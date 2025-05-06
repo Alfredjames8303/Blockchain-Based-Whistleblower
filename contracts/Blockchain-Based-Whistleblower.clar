@@ -358,3 +358,88 @@
   )
 )
 
+
+(define-constant ERR-INVALID-PROOF (err u109))
+(define-constant ERR-ALREADY-CLAIMED (err u110))
+
+(define-map reward-claims
+  { case-id: uint }
+  { claimed: bool }
+)
+
+(define-public (claim-reward 
+    (case-id uint) 
+    (original-secret (buff 32))
+    (proof-data (buff 32)))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+     (reporter-data (unwrap! (get-case-reporter case-id) ERR-CASE-NOT-FOUND))
+     (claim-status (default-to { claimed: false } (map-get? reward-claims { case-id: case-id }))))
+    
+    (asserts! (is-eq (get status case-data) STATUS-RESOLVED) ERR-INVALID-STATUS)
+    (asserts! (not (get claimed claim-status)) ERR-ALREADY-CLAIMED)
+    (asserts! (is-eq (hash160 (concat original-secret proof-data)) 
+                     (get commitment-hash reporter-data)) 
+              ERR-INVALID-PROOF)
+
+    (map-set reward-claims
+      { case-id: case-id }
+      { claimed: true })
+
+    (as-contract
+      (stx-transfer? (get reward-amount case-data) tx-sender 'ST000000000000000000002AMW42H))
+    )
+)
+
+
+(define-public (get-case-status (case-id uint))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND)))
+    (ok (get status case-data))
+  )
+)
+
+
+(define-constant ERR-NOT-DELEGATE (err u111))
+
+(define-map case-delegates
+  { case-id: uint }
+  { delegate: principal }
+)
+
+(define-public (delegate-case (case-id uint) (delegate-address principal))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND)))
+    
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    
+    (map-set case-delegates
+      { case-id: case-id }
+      { delegate: delegate-address })
+    
+    (ok true)))
+
+(define-read-only (get-case-delegate (case-id uint))
+  (map-get? case-delegates { case-id: case-id }))
+
+(define-public (delegate-resolve-case 
+    (case-id uint) 
+    (resolution-details (string-utf8 500)) 
+    (reward-amount uint))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+     (delegate-data (unwrap! (get-case-delegate case-id) ERR-NOT-DELEGATE)))
+    
+    (asserts! (is-eq tx-sender (get delegate delegate-data)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    
+    (map-set cases
+      { case-id: case-id }
+      (merge case-data { 
+        status: STATUS-RESOLVED,
+        resolution-details: (some resolution-details),
+        reward-amount: reward-amount
+      }))
+    
+    (ok true)))
