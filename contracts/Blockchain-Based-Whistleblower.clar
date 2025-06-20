@@ -25,6 +25,42 @@
 (define-data-var admin principal tx-sender)
 (define-data-var reviewers-count uint u0)
 
+
+(define-constant ERR-INSUFFICIENT-SIGNATURES (err u112))
+(define-constant ERR-PROPOSAL-NOT-FOUND (err u113))
+(define-constant ERR-ALREADY-SIGNED (err u114))
+(define-constant ERR-PROPOSAL-EXECUTED (err u115))
+(define-constant ERR-NOT-SIGNER (err u116))
+(define-constant ERR-INVALID-THRESHOLD (err u117))
+
+(define-data-var proposal-count uint u0)
+(define-data-var signature-threshold uint u2)
+(define-data-var signer-count uint u0)
+
+(define-map authorized-signers
+  { signer: principal }
+  { active: bool }
+)
+
+(define-map resolution-proposals
+  { proposal-id: uint }
+  {
+    case-id: uint,
+    resolution-details: (string-utf8 500),
+    reward-amount: uint,
+    proposer: principal,
+    executed: bool,
+    signature-count: uint,
+    proposal-type: uint,
+    timestamp: uint
+  }
+)
+
+(define-map proposal-signatures
+  { proposal-id: uint, signer: principal }
+  { signed: bool }
+)
+
 (define-map cases
   { case-id: uint }
   {
@@ -443,3 +479,196 @@
       }))
     
     (ok true)))
+  
+
+(define-public (add-authorized-signer (signer principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (map-set authorized-signers
+      { signer: signer }
+      { active: true }
+    )
+    (var-set signer-count (+ (var-get signer-count) u1))
+    (ok true)
+  )
+)
+
+(define-public (remove-authorized-signer (signer principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-authorized-signer signer) ERR-NOT-SIGNER)
+    (map-set authorized-signers
+      { signer: signer }
+      { active: false }
+    )
+    (var-set signer-count (- (var-get signer-count) u1))
+    (ok true)
+  )
+)
+
+(define-public (set-signature-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (> new-threshold u0) (<= new-threshold (var-get signer-count))) ERR-INVALID-THRESHOLD)
+    (var-set signature-threshold new-threshold)
+    (ok true)
+  )
+)
+
+(define-public (propose-case-resolution 
+    (case-id uint) 
+    (resolution-details (string-utf8 500)) 
+    (reward-amount uint))
+  (let
+    (
+      (proposal-id (+ (var-get proposal-count) u1))
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+    )
+    (asserts! (is-authorized-signer tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    
+    (map-set resolution-proposals
+      { proposal-id: proposal-id }
+      {
+        case-id: case-id,
+        resolution-details: resolution-details,
+        reward-amount: reward-amount,
+        proposer: tx-sender,
+        executed: false,
+        signature-count: u1,
+        proposal-type: u1,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (map-set proposal-signatures
+      { proposal-id: proposal-id, signer: tx-sender }
+      { signed: true }
+    )
+    
+    (var-set proposal-count proposal-id)
+    (ok proposal-id)
+  )
+)
+
+(define-public (propose-case-rejection 
+    (case-id uint) 
+    (resolution-details (string-utf8 500)))
+  (let
+    (
+      (proposal-id (+ (var-get proposal-count) u1))
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+    )
+    (asserts! (is-authorized-signer tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    
+    (map-set resolution-proposals
+      { proposal-id: proposal-id }
+      {
+        case-id: case-id,
+        resolution-details: resolution-details,
+        reward-amount: u0,
+        proposer: tx-sender,
+        executed: false,
+        signature-count: u1,
+        proposal-type: u2,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (map-set proposal-signatures
+      { proposal-id: proposal-id, signer: tx-sender }
+      { signed: true }
+    )
+    
+    (var-set proposal-count proposal-id)
+    (ok proposal-id)
+  )
+)
+
+(define-public (sign-proposal (proposal-id uint))
+  (let
+    (
+      (proposal-data (unwrap! (get-proposal proposal-id) ERR-PROPOSAL-NOT-FOUND))
+      (existing-signature (get-proposal-signature proposal-id tx-sender))
+    )
+    (asserts! (is-authorized-signer tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get executed proposal-data)) ERR-PROPOSAL-EXECUTED)
+    (asserts! (is-none existing-signature) ERR-ALREADY-SIGNED)
+    
+    (map-set proposal-signatures
+      { proposal-id: proposal-id, signer: tx-sender }
+      { signed: true }
+    )
+    
+    (map-set resolution-proposals
+      { proposal-id: proposal-id }
+      (merge proposal-data { signature-count: (+ (get signature-count proposal-data) u1) })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (execute-proposal (proposal-id uint))
+  (let
+    (
+      (proposal-data (unwrap! (get-proposal proposal-id) ERR-PROPOSAL-NOT-FOUND))
+      (case-data (unwrap! (get-case (get case-id proposal-data)) ERR-CASE-NOT-FOUND))
+    )
+    (asserts! (is-authorized-signer tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get executed proposal-data)) ERR-PROPOSAL-EXECUTED)
+    (asserts! (>= (get signature-count proposal-data) (var-get signature-threshold)) ERR-INSUFFICIENT-SIGNATURES)
+    
+    (map-set resolution-proposals
+      { proposal-id: proposal-id }
+      (merge proposal-data { executed: true })
+    )
+    
+    (if (is-eq (get proposal-type proposal-data) u1)
+      (map-set cases
+        { case-id: (get case-id proposal-data) }
+        (merge case-data { 
+          status: STATUS-RESOLVED,
+          resolution-details: (some (get resolution-details proposal-data)),
+          reward-amount: (get reward-amount proposal-data)
+        })
+      )
+      (map-set cases
+        { case-id: (get case-id proposal-data) }
+        (merge case-data { 
+          status: STATUS-REJECTED,
+          resolution-details: (some (get resolution-details proposal-data))
+        })
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+(define-read-only (is-authorized-signer (signer principal))
+  (default-to false (get active (map-get? authorized-signers { signer: signer })))
+)
+
+(define-read-only (get-proposal (proposal-id uint))
+  (map-get? resolution-proposals { proposal-id: proposal-id })
+)
+
+(define-read-only (get-proposal-signature (proposal-id uint) (signer principal))
+  (map-get? proposal-signatures { proposal-id: proposal-id, signer: signer })
+)
+
+(define-read-only (get-signature-threshold)
+  (var-get signature-threshold)
+)
+
+(define-read-only (get-proposal-count)
+  (var-get proposal-count)
+)
+
+(define-read-only (get-signer-count)
+  (var-get signer-count)
+)
