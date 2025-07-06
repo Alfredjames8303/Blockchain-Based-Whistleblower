@@ -32,23 +32,10 @@
 (define-constant ERR-PROPOSAL-EXECUTED (err u115))
 (define-constant ERR-NOT-SIGNER (err u116))
 (define-constant ERR-INVALID-THRESHOLD (err u117))
-(define-constant ERR-INVALID-PRIORITY (err u118))
-(define-constant ERR-CASE-NOT-URGENT (err u119))
 
 (define-data-var proposal-count uint u0)
 (define-data-var signature-threshold uint u2)
 (define-data-var signer-count uint u0)
-
-(define-constant PRIORITY-LOW u1)
-(define-constant PRIORITY-MEDIUM u2)
-(define-constant PRIORITY-HIGH u3)
-(define-constant PRIORITY-URGENT u4)
-
-(define-constant HOURS-24 u144)
-(define-constant HOURS-72 u432)
-(define-constant HOURS-168 u1008)
-
-(define-data-var escalation-enabled bool true)
 
 (define-map authorized-signers
   { signer: principal }
@@ -134,15 +121,6 @@
   { count: uint }
 )
 
-(define-map case-escalations
-  { case-id: uint }
-  { 
-    escalation-count: uint,
-    last-escalation-height: uint,
-    escalation-priority: uint
-  }
-)
-
 (define-read-only (get-case (case-id uint))
   (map-get? cases { case-id: case-id })
 )
@@ -178,46 +156,6 @@
 (define-read-only (get-case-comments-count (case-id uint))
   (default-to { count: u0 } (map-get? case-comments-count { case-id: case-id }))
 )
-
-(define-read-only (calculate-case-priority (case-id uint))
-  (let
-    ((case-data (unwrap! (get-case case-id) (err u0)))
-     (case-age (- stacks-block-height (get timestamp case-data)))
-     (severity (get severity case-data))
-     (status (get status case-data)))
-    (if (or (is-eq status STATUS-RESOLVED) (is-eq status STATUS-REJECTED))
-      (ok u0)
-      (if (and (>= severity u4) (>= case-age HOURS-24))
-        (ok PRIORITY-URGENT)
-        (if (and (>= severity u3) (>= case-age HOURS-72))
-          (ok PRIORITY-HIGH)
-          (if (>= case-age HOURS-168)
-            (ok PRIORITY-MEDIUM)
-            (ok PRIORITY-LOW)))))))
-
-(define-read-only (get-case-escalation (case-id uint))
-  (default-to { escalation-count: u0, last-escalation-height: u0, escalation-priority: u0 } 
-              (map-get? case-escalations { case-id: case-id })))
-
-(define-read-only (is-case-overdue (case-id uint))
-  (match (calculate-case-priority case-id)
-    success (>= success PRIORITY-HIGH)
-    err false))
-
-(define-read-only (get-urgent-cases-count)
-  (let
-    ((total-cases (var-get case-count))
-     (urgent-count (fold count-urgent-cases (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) u0)))
-    (if (> total-cases u20)
-      (ok u999)
-      (ok urgent-count))))
-
-(define-private (count-urgent-cases (case-id uint) (acc uint))
-  (if (<= case-id (var-get case-count))
-    (match (calculate-case-priority case-id)
-      priority (if (>= priority PRIORITY-HIGH) (+ acc u1) acc)
-      err acc)
-    acc))
 
 (define-public (submit-anonymous-report 
     (title (string-utf8 100))
@@ -265,15 +203,6 @@
     (map-set case-comments-count
       { case-id: case-id }
       { count: u0 }
-    )
-    
-    (map-set case-escalations
-      { case-id: case-id }
-      { 
-        escalation-count: u0,
-        last-escalation-height: u0,
-        escalation-priority: PRIORITY-LOW
-      }
     )
     
     (var-set case-count case-id)
@@ -743,90 +672,3 @@
 (define-read-only (get-signer-count)
   (var-get signer-count)
 )
-
-(define-public (escalate-case (case-id uint))
-  (let
-    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
-     (escalation-data (get-case-escalation case-id))
-     (current-priority (unwrap! (calculate-case-priority case-id) ERR-INVALID-PRIORITY)))
-    (asserts! (var-get escalation-enabled) ERR-NOT-AUTHORIZED)
-    (asserts! (>= current-priority PRIORITY-HIGH) ERR-CASE-NOT-URGENT)
-    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
-    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
-    (asserts! (> (- stacks-block-height (get last-escalation-height escalation-data)) HOURS-24) ERR-CASE-NOT-URGENT)
-    
-    (map-set case-escalations
-      { case-id: case-id }
-      { 
-        escalation-count: (+ (get escalation-count escalation-data) u1),
-        last-escalation-height: stacks-block-height,
-        escalation-priority: current-priority
-      }
-    )
-    
-    (ok true)
-  )
-)
-
-(define-public (auto-escalate-case (case-id uint))
-  (let
-    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
-     (escalation-data (get-case-escalation case-id))
-     (current-priority (unwrap! (calculate-case-priority case-id) ERR-INVALID-PRIORITY)))
-    (asserts! (var-get escalation-enabled) ERR-NOT-AUTHORIZED)
-    (asserts! (>= current-priority PRIORITY-HIGH) ERR-CASE-NOT-URGENT)
-    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
-    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
-    (asserts! (> (- stacks-block-height (get last-escalation-height escalation-data)) HOURS-24) ERR-CASE-NOT-URGENT)
-    
-    (map-set case-escalations
-      { case-id: case-id }
-      { 
-        escalation-count: (+ (get escalation-count escalation-data) u1),
-        last-escalation-height: stacks-block-height,
-        escalation-priority: current-priority
-      }
-    )
-    
-    (if (is-eq (get status case-data) STATUS-PENDING)
-      (begin
-        (map-set cases
-          { case-id: case-id }
-          (merge case-data { status: STATUS-UNDER-REVIEW })
-        )
-        true
-      )
-      true
-    )
-    
-    (ok true)
-  )
-)
-
-(define-public (toggle-escalation-system (enabled bool))
-  (begin
-    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
-    (var-set escalation-enabled enabled)
-    (ok true)
-  )
-)
-
-(define-public (bulk-escalate-overdue-cases)
-  (let
-    ((total-cases (var-get case-count))
-     (results (fold process-case-escalation (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) u0)))
-    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
-    (asserts! (var-get escalation-enabled) ERR-NOT-AUTHORIZED)
-    (ok results)
-  )
-)
-
-(define-private (process-case-escalation (case-id uint) (escalated-count uint))
-  (if (and (<= case-id (var-get case-count)) (is-case-overdue case-id))
-    (match (auto-escalate-case case-id)
-      success (+ escalated-count u1)
-      error escalated-count)
-    escalated-count))
-
-(define-read-only (get-escalation-status)
-  (ok (var-get escalation-enabled)))
