@@ -34,6 +34,9 @@
 (define-constant ERR-INVALID-THRESHOLD (err u117))
 (define-constant ERR-INVALID-PRIORITY (err u118))
 (define-constant ERR-CASE-NOT-URGENT (err u119))
+(define-constant ERR-DUPLICATE-CASE (err u120))
+(define-constant ERR-SIMILARITY-NOT-FOUND (err u121))
+(define-constant ERR-INVALID-SIMILARITY-THRESHOLD (err u122))
 
 (define-data-var proposal-count uint u0)
 (define-data-var signature-threshold uint u2)
@@ -49,6 +52,17 @@
 (define-constant HOURS-168 u1008)
 
 (define-data-var escalation-enabled bool true)
+
+;; Case similarity detection constants
+(define-constant SIMILARITY-HIGH u80)
+(define-constant SIMILARITY-MEDIUM u60)
+(define-constant SIMILARITY-LOW u40)
+(define-constant MAX-SIMILAR-CASES u10)
+
+;; Similarity system variables
+(define-data-var similarity-threshold uint u70)
+(define-data-var similarity-enabled bool true)
+(define-data-var fingerprint-count uint u0)
 
 (define-map authorized-signers
   { signer: principal }
@@ -143,6 +157,42 @@
   }
 )
 
+;; Case similarity and fingerprint maps
+(define-map case-fingerprints
+  { case-id: uint }
+  {
+    title-hash: (buff 32),
+    description-hash: (buff 32), 
+    category-hash: (buff 32),
+    combined-fingerprint: (buff 32),
+    similarity-score: uint
+  }
+)
+
+(define-map similar-cases
+  { primary-case: uint, related-case: uint }
+  { 
+    similarity-percentage: uint,
+    detection-height: uint,
+    verified: bool
+  }
+)
+
+(define-map case-similarity-clusters
+  { cluster-id: uint }
+  {
+    primary-case: uint,
+    case-count: uint,
+    cluster-fingerprint: (buff 32),
+    creation-height: uint
+  }
+)
+
+(define-map case-cluster-members
+  { case-id: uint }
+  { cluster-id: uint }
+)
+
 (define-read-only (get-case (case-id uint))
   (map-get? cases { case-id: case-id })
 )
@@ -219,6 +269,124 @@
       err acc)
     acc))
 
+;; Case similarity detection functions
+(define-read-only (get-case-fingerprint (case-id uint))
+  (map-get? case-fingerprints { case-id: case-id }))
+
+(define-read-only (get-similar-cases (case-id uint))
+  (map-get? similar-cases { primary-case: case-id, related-case: case-id }))
+
+(define-read-only (get-case-cluster (case-id uint))
+  (match (map-get? case-cluster-members { case-id: case-id })
+    cluster-data (map-get? case-similarity-clusters { cluster-id: (get cluster-id cluster-data) })
+    none))
+
+(define-read-only (get-similarity-threshold)
+  (var-get similarity-threshold))
+
+(define-read-only (is-similarity-enabled)
+  (var-get similarity-enabled))
+
+;; Create fingerprint from case data  
+(define-private (create-case-fingerprint 
+    (title (string-utf8 100)) 
+    (description (string-utf8 500)) 
+    (category (string-utf8 50)))
+  (let 
+    ((title-hash (hash160 (unwrap-panic (to-consensus-buff? title))))
+     (description-hash (hash160 (unwrap-panic (to-consensus-buff? description))))
+     (category-hash (hash160 (unwrap-panic (to-consensus-buff? category)))))
+    (hash160 (concat (concat title-hash description-hash) category-hash))))
+
+;; Calculate similarity between two fingerprints using simple comparison
+(define-private (calculate-similarity (fingerprint-a (buff 32)) (fingerprint-b (buff 32)))
+  (if (is-eq fingerprint-a fingerprint-b)
+    u100
+    (let
+      ((match-bytes (fold compare-bytes 
+                         (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 
+                               u16 u17 u18 u19 u20 u21 u22 u23 u24 u25 u26 u27 u28 u29 u30 u31) 
+                         { fp-a: fingerprint-a, fp-b: fingerprint-b, matches: u0 })))
+      (/ (* (get matches match-bytes) u100) u32))))
+
+;; Compare individual bytes of fingerprints
+(define-private (compare-bytes 
+    (index uint) 
+    (data { fp-a: (buff 32), fp-b: (buff 32), matches: uint }))
+  (let
+    ((byte-a (unwrap-panic (element-at (get fp-a data) index)))
+     (byte-b (unwrap-panic (element-at (get fp-b data) index))))
+    (if (is-eq byte-a byte-b)
+      { fp-a: (get fp-a data), fp-b: (get fp-b data), matches: (+ (get matches data) u1) }
+      data)))
+
+;; Check for duplicate or similar cases before submission
+(define-private (check-case-similarity 
+    (title (string-utf8 100)) 
+    (description (string-utf8 500)) 
+    (category (string-utf8 50)))
+  (let
+    ((new-fingerprint (create-case-fingerprint title description category)))
+    (fold check-existing-fingerprint 
+          (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) 
+          { fingerprint: new-fingerprint, max-similarity: u0, similar-case: u0 })))
+
+;; Check similarity against existing cases
+(define-private (check-existing-fingerprint 
+    (case-id uint) 
+    (check-data { fingerprint: (buff 32), max-similarity: uint, similar-case: uint }))
+  (if (<= case-id (var-get case-count))
+    (match (get-case-fingerprint case-id)
+      existing-fp 
+        (let 
+          ((similarity (calculate-similarity 
+                        (get fingerprint check-data) 
+                        (get combined-fingerprint existing-fp))))
+          (if (> similarity (get max-similarity check-data))
+            { fingerprint: (get fingerprint check-data), 
+              max-similarity: similarity, 
+              similar-case: case-id }
+            check-data))
+      check-data)
+    check-data))
+
+;; Store fingerprint and check for duplicates during case submission
+(define-private (store-case-fingerprint 
+    (case-id uint) 
+    (title (string-utf8 100)) 
+    (description (string-utf8 500)) 
+    (category (string-utf8 50)))
+  (let
+    ((similarity-check (check-case-similarity title description category))
+     (fingerprint (get fingerprint similarity-check))
+     (max-similarity (get max-similarity similarity-check))
+     (similar-case (get similar-case similarity-check)))
+    
+    ;; Always store the fingerprint
+    (map-set case-fingerprints
+      { case-id: case-id }
+      {
+        title-hash: (hash160 (unwrap-panic (to-consensus-buff? title))),
+        description-hash: (hash160 (unwrap-panic (to-consensus-buff? description))),
+        category-hash: (hash160 (unwrap-panic (to-consensus-buff? category))),
+        combined-fingerprint: fingerprint,
+        similarity-score: max-similarity
+      })
+    
+    ;; If similarity above threshold, record the relationship
+    (if (and (> max-similarity (var-get similarity-threshold)) (> similar-case u0))
+      (begin
+        (map-set similar-cases
+          { primary-case: similar-case, related-case: case-id }
+          {
+            similarity-percentage: max-similarity,
+            detection-height: stacks-block-height,
+            verified: false
+          })
+        ;; Return similarity data
+        (some { similar-case: similar-case, similarity: max-similarity }))
+      none)))
+
 (define-public (submit-anonymous-report 
     (title (string-utf8 100))
     (description (string-utf8 500))
@@ -229,11 +397,22 @@
   (let
     (
       (case-id (+ (var-get case-count) u1))
+      (similarity-result (if (var-get similarity-enabled)
+                          (store-case-fingerprint case-id title description category)
+                          none))
     )
     (asserts! (> (len evidence-hash) u0) ERR-INVALID-EVIDENCE)
     (asserts! (> (len title) u0) ERR-INVALID-REPORT)
     (asserts! (> (len description) u0) ERR-INVALID-REPORT)
     (asserts! (and (>= severity u1) (<= severity u5)) ERR-INVALID-REPORT)
+    
+    ;; Check for duplicate cases if similarity detection is enabled
+    (asserts! (if (var-get similarity-enabled)
+                (match similarity-result
+                  similar-data (< (get similarity similar-data) u95) ;; Reject if >95% similar
+                  true)
+                true) 
+              ERR-DUPLICATE-CASE)
     
     (map-set cases
       { case-id: case-id }
@@ -830,3 +1009,76 @@
 
 (define-read-only (get-escalation-status)
   (ok (var-get escalation-enabled)))
+
+;; Similarity system management functions
+(define-public (set-similarity-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (>= new-threshold u0) (<= new-threshold u100)) ERR-INVALID-SIMILARITY-THRESHOLD)
+    (var-set similarity-threshold new-threshold)
+    (ok true)))
+
+(define-public (toggle-similarity-system (enabled bool))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (var-set similarity-enabled enabled)
+    (ok true)))
+
+(define-public (verify-similar-cases (primary-case uint) (related-case uint))
+  (let
+    ((similarity-data (unwrap! (map-get? similar-cases { primary-case: primary-case, related-case: related-case }) ERR-SIMILARITY-NOT-FOUND)))
+    (asserts! (is-reviewer tx-sender) ERR-NOT-AUTHORIZED)
+    (map-set similar-cases
+      { primary-case: primary-case, related-case: related-case }
+      (merge similarity-data { verified: true }))
+    (ok true)))
+
+(define-public (find-similar-cases-batch (target-case uint))
+  (let
+    ((target-fingerprint (unwrap! (get-case-fingerprint target-case) ERR-CASE-NOT-FOUND)))
+    (ok (fold find-similar-case 
+              (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) 
+              { target: (get combined-fingerprint target-fingerprint), 
+                results: (list), 
+                target-case: target-case }))))
+
+(define-private (find-similar-case 
+    (case-id uint) 
+    (search-data { target: (buff 32), results: (list 10 { case-id: uint, similarity: uint }), target-case: uint }))
+  (if (and (<= case-id (var-get case-count)) (not (is-eq case-id (get target-case search-data))))
+    (match (get-case-fingerprint case-id)
+      fp-data 
+        (let 
+          ((similarity (calculate-similarity (get target search-data) (get combined-fingerprint fp-data))))
+          (if (>= similarity (var-get similarity-threshold))
+            { target: (get target search-data), 
+              results: (unwrap-panic (as-max-len? 
+                         (append (get results search-data) { case-id: case-id, similarity: similarity }) 
+                         u10)), 
+              target-case: (get target-case search-data) }
+            search-data))
+      search-data)
+    search-data))
+
+(define-public (get-case-similarity-stats (case-id uint))
+  (let
+    ((fingerprint-data (unwrap! (get-case-fingerprint case-id) ERR-CASE-NOT-FOUND))
+     (cluster-data (get-case-cluster case-id)))
+    (ok {
+      has-fingerprint: true,
+      similarity-score: (get similarity-score fingerprint-data),
+      in-cluster: (is-some cluster-data),
+      cluster-info: cluster-data
+    })))
+
+(define-read-only (get-similarity-system-stats)
+  (ok {
+    similarity-enabled: (var-get similarity-enabled),
+    current-threshold: (var-get similarity-threshold),
+    total-fingerprints: (var-get case-count),
+    system-version: u1
+  }))
+
+
+
+  
