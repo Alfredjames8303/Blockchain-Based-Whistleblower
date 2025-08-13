@@ -1,0 +1,1084 @@
+
+;; title: Blockchain-Based-Whistleblower
+;; version:
+;; summary:
+;; description:
+(define-constant ERR-NOT-AUTHORIZED (err u100))
+(define-constant ERR-CASE-NOT-FOUND (err u101))
+(define-constant ERR-INVALID-STATUS (err u102))
+(define-constant ERR-ALREADY-VOTED (err u103))
+(define-constant ERR-INVALID-VOTE (err u104))
+(define-constant ERR-INVALID-EVIDENCE (err u105))
+(define-constant ERR-INVALID-REPORT (err u106))
+(define-constant ERR-CASE-CLOSED (err u107))
+(define-constant ERR-INVALID-REWARD (err u108))
+
+(define-constant STATUS-PENDING u1)
+(define-constant STATUS-UNDER-REVIEW u2)
+(define-constant STATUS-RESOLVED u3)
+(define-constant STATUS-REJECTED u4)
+
+(define-constant VOTE-VALID u1)
+(define-constant VOTE-INVALID u2)
+
+(define-data-var case-count uint u0)
+(define-data-var admin principal tx-sender)
+(define-data-var reviewers-count uint u0)
+
+
+(define-constant ERR-INSUFFICIENT-SIGNATURES (err u112))
+(define-constant ERR-PROPOSAL-NOT-FOUND (err u113))
+(define-constant ERR-ALREADY-SIGNED (err u114))
+(define-constant ERR-PROPOSAL-EXECUTED (err u115))
+(define-constant ERR-NOT-SIGNER (err u116))
+(define-constant ERR-INVALID-THRESHOLD (err u117))
+(define-constant ERR-INVALID-PRIORITY (err u118))
+(define-constant ERR-CASE-NOT-URGENT (err u119))
+(define-constant ERR-DUPLICATE-CASE (err u120))
+(define-constant ERR-SIMILARITY-NOT-FOUND (err u121))
+(define-constant ERR-INVALID-SIMILARITY-THRESHOLD (err u122))
+
+(define-data-var proposal-count uint u0)
+(define-data-var signature-threshold uint u2)
+(define-data-var signer-count uint u0)
+
+(define-constant PRIORITY-LOW u1)
+(define-constant PRIORITY-MEDIUM u2)
+(define-constant PRIORITY-HIGH u3)
+(define-constant PRIORITY-URGENT u4)
+
+(define-constant HOURS-24 u144)
+(define-constant HOURS-72 u432)
+(define-constant HOURS-168 u1008)
+
+(define-data-var escalation-enabled bool true)
+
+;; Case similarity detection constants
+(define-constant SIMILARITY-HIGH u80)
+(define-constant SIMILARITY-MEDIUM u60)
+(define-constant SIMILARITY-LOW u40)
+(define-constant MAX-SIMILAR-CASES u10)
+
+;; Similarity system variables
+(define-data-var similarity-threshold uint u70)
+(define-data-var similarity-enabled bool true)
+(define-data-var fingerprint-count uint u0)
+
+(define-map authorized-signers
+  { signer: principal }
+  { active: bool }
+)
+
+(define-map resolution-proposals
+  { proposal-id: uint }
+  {
+    case-id: uint,
+    resolution-details: (string-utf8 500),
+    reward-amount: uint,
+    proposer: principal,
+    executed: bool,
+    signature-count: uint,
+    proposal-type: uint,
+    timestamp: uint
+  }
+)
+
+(define-map proposal-signatures
+  { proposal-id: uint, signer: principal }
+  { signed: bool }
+)
+
+(define-map cases
+  { case-id: uint }
+  {
+    title: (string-utf8 100),
+    description: (string-utf8 500),
+    evidence-hash: (buff 32),
+    status: uint,
+    timestamp: uint,
+    category: (string-utf8 50),
+    severity: uint,
+    reward-amount: uint,
+    valid-votes: uint,
+    invalid-votes: uint,
+    resolution-details: (optional (string-utf8 500))
+  }
+)
+
+(define-map case-reporters
+  { case-id: uint }
+  { commitment-hash: (buff 32) }
+)
+
+(define-map reviewers
+  { reviewer: principal }
+  { active: bool }
+)
+
+(define-map reviewer-votes
+  { case-id: uint, reviewer: principal }
+  { vote: uint }
+)
+
+(define-map case-evidence
+  { case-id: uint, evidence-id: uint }
+  { 
+    evidence-hash: (buff 32),
+    description: (string-utf8 100),
+    timestamp: uint
+  }
+)
+
+(define-map case-evidence-count
+  { case-id: uint }
+  { count: uint }
+)
+
+(define-map case-comments
+  { case-id: uint, comment-id: uint }
+  {
+    author: principal,
+    content: (string-utf8 200),
+    timestamp: uint
+  }
+)
+
+(define-map case-comments-count
+  { case-id: uint }
+  { count: uint }
+)
+
+(define-map case-escalations
+  { case-id: uint }
+  { 
+    escalation-count: uint,
+    last-escalation-height: uint,
+    escalation-priority: uint
+  }
+)
+
+;; Case similarity and fingerprint maps
+(define-map case-fingerprints
+  { case-id: uint }
+  {
+    title-hash: (buff 32),
+    description-hash: (buff 32), 
+    category-hash: (buff 32),
+    combined-fingerprint: (buff 32),
+    similarity-score: uint
+  }
+)
+
+(define-map similar-cases
+  { primary-case: uint, related-case: uint }
+  { 
+    similarity-percentage: uint,
+    detection-height: uint,
+    verified: bool
+  }
+)
+
+(define-map case-similarity-clusters
+  { cluster-id: uint }
+  {
+    primary-case: uint,
+    case-count: uint,
+    cluster-fingerprint: (buff 32),
+    creation-height: uint
+  }
+)
+
+(define-map case-cluster-members
+  { case-id: uint }
+  { cluster-id: uint }
+)
+
+(define-read-only (get-case (case-id uint))
+  (map-get? cases { case-id: case-id })
+)
+
+(define-read-only (get-case-reporter (case-id uint))
+  (map-get? case-reporters { case-id: case-id })
+)
+
+(define-read-only (get-case-count)
+  (var-get case-count)
+)
+
+(define-read-only (is-reviewer (reviewer principal))
+  (default-to false (get active (map-get? reviewers { reviewer: reviewer })))
+)
+
+(define-read-only (get-reviewer-vote (case-id uint) (reviewer principal))
+  (map-get? reviewer-votes { case-id: case-id, reviewer: reviewer })
+)
+
+(define-read-only (get-case-evidence (case-id uint) (evidence-id uint))
+  (map-get? case-evidence { case-id: case-id, evidence-id: evidence-id })
+)
+
+(define-read-only (get-case-evidence-count (case-id uint))
+  (default-to { count: u0 } (map-get? case-evidence-count { case-id: case-id }))
+)
+
+(define-read-only (get-case-comment (case-id uint) (comment-id uint))
+  (map-get? case-comments { case-id: case-id, comment-id: comment-id })
+)
+
+(define-read-only (get-case-comments-count (case-id uint))
+  (default-to { count: u0 } (map-get? case-comments-count { case-id: case-id }))
+)
+
+(define-read-only (calculate-case-priority (case-id uint))
+  (let
+    ((case-data (unwrap! (get-case case-id) (err u0)))
+     (case-age (- stacks-block-height (get timestamp case-data)))
+     (severity (get severity case-data))
+     (status (get status case-data)))
+    (if (or (is-eq status STATUS-RESOLVED) (is-eq status STATUS-REJECTED))
+      (ok u0)
+      (if (and (>= severity u4) (>= case-age HOURS-24))
+        (ok PRIORITY-URGENT)
+        (if (and (>= severity u3) (>= case-age HOURS-72))
+          (ok PRIORITY-HIGH)
+          (if (>= case-age HOURS-168)
+            (ok PRIORITY-MEDIUM)
+            (ok PRIORITY-LOW)))))))
+
+(define-read-only (get-case-escalation (case-id uint))
+  (default-to { escalation-count: u0, last-escalation-height: u0, escalation-priority: u0 } 
+              (map-get? case-escalations { case-id: case-id })))
+
+(define-read-only (is-case-overdue (case-id uint))
+  (match (calculate-case-priority case-id)
+    success (>= success PRIORITY-HIGH)
+    err false))
+
+(define-read-only (get-urgent-cases-count)
+  (let
+    ((total-cases (var-get case-count))
+     (urgent-count (fold count-urgent-cases (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) u0)))
+    (if (> total-cases u20)
+      (ok u999)
+      (ok urgent-count))))
+
+(define-private (count-urgent-cases (case-id uint) (acc uint))
+  (if (<= case-id (var-get case-count))
+    (match (calculate-case-priority case-id)
+      priority (if (>= priority PRIORITY-HIGH) (+ acc u1) acc)
+      err acc)
+    acc))
+
+;; Case similarity detection functions
+(define-read-only (get-case-fingerprint (case-id uint))
+  (map-get? case-fingerprints { case-id: case-id }))
+
+(define-read-only (get-similar-cases (case-id uint))
+  (map-get? similar-cases { primary-case: case-id, related-case: case-id }))
+
+(define-read-only (get-case-cluster (case-id uint))
+  (match (map-get? case-cluster-members { case-id: case-id })
+    cluster-data (map-get? case-similarity-clusters { cluster-id: (get cluster-id cluster-data) })
+    none))
+
+(define-read-only (get-similarity-threshold)
+  (var-get similarity-threshold))
+
+(define-read-only (is-similarity-enabled)
+  (var-get similarity-enabled))
+
+;; Create fingerprint from case data  
+(define-private (create-case-fingerprint 
+    (title (string-utf8 100)) 
+    (description (string-utf8 500)) 
+    (category (string-utf8 50)))
+  (let 
+    ((title-hash (hash160 (unwrap-panic (to-consensus-buff? title))))
+     (description-hash (hash160 (unwrap-panic (to-consensus-buff? description))))
+     (category-hash (hash160 (unwrap-panic (to-consensus-buff? category)))))
+    (hash160 (concat (concat title-hash description-hash) category-hash))))
+
+;; Calculate similarity between two fingerprints using simple comparison
+(define-private (calculate-similarity (fingerprint-a (buff 32)) (fingerprint-b (buff 32)))
+  (if (is-eq fingerprint-a fingerprint-b)
+    u100
+    (let
+      ((match-bytes (fold compare-bytes 
+                         (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 
+                               u16 u17 u18 u19 u20 u21 u22 u23 u24 u25 u26 u27 u28 u29 u30 u31) 
+                         { fp-a: fingerprint-a, fp-b: fingerprint-b, matches: u0 })))
+      (/ (* (get matches match-bytes) u100) u32))))
+
+;; Compare individual bytes of fingerprints
+(define-private (compare-bytes 
+    (index uint) 
+    (data { fp-a: (buff 32), fp-b: (buff 32), matches: uint }))
+  (let
+    ((byte-a (unwrap-panic (element-at (get fp-a data) index)))
+     (byte-b (unwrap-panic (element-at (get fp-b data) index))))
+    (if (is-eq byte-a byte-b)
+      { fp-a: (get fp-a data), fp-b: (get fp-b data), matches: (+ (get matches data) u1) }
+      data)))
+
+;; Check for duplicate or similar cases before submission
+(define-private (check-case-similarity 
+    (title (string-utf8 100)) 
+    (description (string-utf8 500)) 
+    (category (string-utf8 50)))
+  (let
+    ((new-fingerprint (create-case-fingerprint title description category)))
+    (fold check-existing-fingerprint 
+          (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) 
+          { fingerprint: new-fingerprint, max-similarity: u0, similar-case: u0 })))
+
+;; Check similarity against existing cases
+(define-private (check-existing-fingerprint 
+    (case-id uint) 
+    (check-data { fingerprint: (buff 32), max-similarity: uint, similar-case: uint }))
+  (if (<= case-id (var-get case-count))
+    (match (get-case-fingerprint case-id)
+      existing-fp 
+        (let 
+          ((similarity (calculate-similarity 
+                        (get fingerprint check-data) 
+                        (get combined-fingerprint existing-fp))))
+          (if (> similarity (get max-similarity check-data))
+            { fingerprint: (get fingerprint check-data), 
+              max-similarity: similarity, 
+              similar-case: case-id }
+            check-data))
+      check-data)
+    check-data))
+
+;; Store fingerprint and check for duplicates during case submission
+(define-private (store-case-fingerprint 
+    (case-id uint) 
+    (title (string-utf8 100)) 
+    (description (string-utf8 500)) 
+    (category (string-utf8 50)))
+  (let
+    ((similarity-check (check-case-similarity title description category))
+     (fingerprint (get fingerprint similarity-check))
+     (max-similarity (get max-similarity similarity-check))
+     (similar-case (get similar-case similarity-check)))
+    
+    ;; Always store the fingerprint
+    (map-set case-fingerprints
+      { case-id: case-id }
+      {
+        title-hash: (hash160 (unwrap-panic (to-consensus-buff? title))),
+        description-hash: (hash160 (unwrap-panic (to-consensus-buff? description))),
+        category-hash: (hash160 (unwrap-panic (to-consensus-buff? category))),
+        combined-fingerprint: fingerprint,
+        similarity-score: max-similarity
+      })
+    
+    ;; If similarity above threshold, record the relationship
+    (if (and (> max-similarity (var-get similarity-threshold)) (> similar-case u0))
+      (begin
+        (map-set similar-cases
+          { primary-case: similar-case, related-case: case-id }
+          {
+            similarity-percentage: max-similarity,
+            detection-height: stacks-block-height,
+            verified: false
+          })
+        ;; Return similarity data
+        (some { similar-case: similar-case, similarity: max-similarity }))
+      none)))
+
+(define-public (submit-anonymous-report 
+    (title (string-utf8 100))
+    (description (string-utf8 500))
+    (evidence-hash (buff 32))
+    (commitment-hash (buff 32))
+    (category (string-utf8 50))
+    (severity uint))
+  (let
+    (
+      (case-id (+ (var-get case-count) u1))
+      (similarity-result (if (var-get similarity-enabled)
+                          (store-case-fingerprint case-id title description category)
+                          none))
+    )
+    (asserts! (> (len evidence-hash) u0) ERR-INVALID-EVIDENCE)
+    (asserts! (> (len title) u0) ERR-INVALID-REPORT)
+    (asserts! (> (len description) u0) ERR-INVALID-REPORT)
+    (asserts! (and (>= severity u1) (<= severity u5)) ERR-INVALID-REPORT)
+    
+    ;; Check for duplicate cases if similarity detection is enabled
+    (asserts! (if (var-get similarity-enabled)
+                (match similarity-result
+                  similar-data (< (get similarity similar-data) u95) ;; Reject if >95% similar
+                  true)
+                true) 
+              ERR-DUPLICATE-CASE)
+    
+    (map-set cases
+      { case-id: case-id }
+      {
+        title: title,
+        description: description,
+        evidence-hash: evidence-hash,
+        status: STATUS-PENDING,
+        timestamp: stacks-block-height,
+        category: category,
+        severity: severity,
+        reward-amount: u0,
+        valid-votes: u0,
+        invalid-votes: u0,
+        resolution-details: none
+      }
+    )
+    
+    (map-set case-reporters
+      { case-id: case-id }
+      { commitment-hash: commitment-hash }
+    )
+    
+    (map-set case-evidence-count
+      { case-id: case-id }
+      { count: u0 }
+    )
+    
+    (map-set case-comments-count
+      { case-id: case-id }
+      { count: u0 }
+    )
+    
+    (map-set case-escalations
+      { case-id: case-id }
+      { 
+        escalation-count: u0,
+        last-escalation-height: u0,
+        escalation-priority: PRIORITY-LOW
+      }
+    )
+    
+    (var-set case-count case-id)
+    (ok case-id)
+  )
+)
+
+(define-public (add-evidence (case-id uint) (evidence-hash (buff 32)) (description (string-utf8 100)))
+  (let
+    (
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+      (evidence-count (get count (get-case-evidence-count case-id)))
+      (new-evidence-id (+ evidence-count u1))
+    )
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    (asserts! (> (len evidence-hash) u0) ERR-INVALID-EVIDENCE)
+    
+    (map-set case-evidence
+      { case-id: case-id, evidence-id: new-evidence-id }
+      {
+        evidence-hash: evidence-hash,
+        description: description,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (map-set case-evidence-count
+      { case-id: case-id }
+      { count: new-evidence-id }
+    )
+    
+    (ok new-evidence-id)
+  )
+)
+
+(define-public (add-comment (case-id uint) (content (string-utf8 200)))
+  (let
+    (
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+      (comments-count (get count (get-case-comments-count case-id)))
+      (new-comment-id (+ comments-count u1))
+    )
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    (asserts! (> (len content) u0) ERR-INVALID-REPORT)
+    
+    (map-set case-comments
+      { case-id: case-id, comment-id: new-comment-id }
+      {
+        author: tx-sender,
+        content: content,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (map-set case-comments-count
+      { case-id: case-id }
+      { count: new-comment-id }
+    )
+    
+    (ok new-comment-id)
+  )
+)
+
+(define-public (add-reviewer (reviewer principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (map-set reviewers
+      { reviewer: reviewer }
+      { active: true }
+    )
+    (var-set reviewers-count (+ (var-get reviewers-count) u1))
+    (ok true)
+  )
+)
+
+(define-public (remove-reviewer (reviewer principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-reviewer reviewer) ERR-NOT-AUTHORIZED)
+    (map-set reviewers
+      { reviewer: reviewer }
+      { active: false }
+    )
+    (var-set reviewers-count (- (var-get reviewers-count) u1))
+    (ok true)
+  )
+)
+
+(define-public (change-case-status (case-id uint) (new-status uint))
+  (let
+    (
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+    )
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (>= new-status STATUS-PENDING) (<= new-status STATUS-REJECTED)) ERR-INVALID-STATUS)
+    
+    (map-set cases
+      { case-id: case-id }
+      (merge case-data { status: new-status })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (vote-on-case (case-id uint) (vote uint))
+  (let
+    (
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+      (reviewer-vote (get-reviewer-vote case-id tx-sender))
+    )
+    (asserts! (is-reviewer tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (is-none reviewer-vote) ERR-ALREADY-VOTED)
+    (asserts! (or (is-eq vote VOTE-VALID) (is-eq vote VOTE-INVALID)) ERR-INVALID-VOTE)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    
+    (map-set reviewer-votes
+      { case-id: case-id, reviewer: tx-sender }
+      { vote: vote }
+    )
+    
+    (if (is-eq vote VOTE-VALID)
+      (map-set cases
+        { case-id: case-id }
+        (merge case-data { valid-votes: (+ (get valid-votes case-data) u1) })
+      )
+      (map-set cases
+        { case-id: case-id }
+        (merge case-data { invalid-votes: (+ (get invalid-votes case-data) u1) })
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (resolve-case (case-id uint) (resolution-details (string-utf8 500)) (reward-amount uint))
+  (let
+    (
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+    )
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    (asserts! (>= (get valid-votes case-data) (get invalid-votes case-data)) ERR-INVALID-REPORT)
+    
+    (map-set cases
+      { case-id: case-id }
+      (merge case-data { 
+        status: STATUS-RESOLVED,
+        resolution-details: (some resolution-details),
+        reward-amount: reward-amount
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (reject-case (case-id uint) (resolution-details (string-utf8 500)))
+  (let
+    (
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+    )
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    
+    (map-set cases
+      { case-id: case-id }
+      (merge case-data { 
+        status: STATUS-REJECTED,
+        resolution-details: (some resolution-details)
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (transfer-admin (new-admin principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (var-set admin new-admin)
+    (ok true)
+  )
+)
+
+
+(define-constant ERR-INVALID-PROOF (err u109))
+(define-constant ERR-ALREADY-CLAIMED (err u110))
+
+(define-map reward-claims
+  { case-id: uint }
+  { claimed: bool }
+)
+
+(define-public (claim-reward 
+    (case-id uint) 
+    (original-secret (buff 32))
+    (proof-data (buff 32)))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+     (reporter-data (unwrap! (get-case-reporter case-id) ERR-CASE-NOT-FOUND))
+     (claim-status (default-to { claimed: false } (map-get? reward-claims { case-id: case-id }))))
+    
+    (asserts! (is-eq (get status case-data) STATUS-RESOLVED) ERR-INVALID-STATUS)
+    (asserts! (not (get claimed claim-status)) ERR-ALREADY-CLAIMED)
+    (asserts! (is-eq (hash160 (concat original-secret proof-data)) 
+                     (get commitment-hash reporter-data)) 
+              ERR-INVALID-PROOF)
+
+    (map-set reward-claims
+      { case-id: case-id }
+      { claimed: true })
+
+    (as-contract
+      (stx-transfer? (get reward-amount case-data) tx-sender 'ST000000000000000000002AMW42H))
+    )
+)
+
+
+(define-public (get-case-status (case-id uint))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND)))
+    (ok (get status case-data))
+  )
+)
+
+
+(define-constant ERR-NOT-DELEGATE (err u111))
+
+(define-map case-delegates
+  { case-id: uint }
+  { delegate: principal }
+)
+
+(define-public (delegate-case (case-id uint) (delegate-address principal))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND)))
+    
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    
+    (map-set case-delegates
+      { case-id: case-id }
+      { delegate: delegate-address })
+    
+    (ok true)))
+
+(define-read-only (get-case-delegate (case-id uint))
+  (map-get? case-delegates { case-id: case-id }))
+
+(define-public (delegate-resolve-case 
+    (case-id uint) 
+    (resolution-details (string-utf8 500)) 
+    (reward-amount uint))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+     (delegate-data (unwrap! (get-case-delegate case-id) ERR-NOT-DELEGATE)))
+    
+    (asserts! (is-eq tx-sender (get delegate delegate-data)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    
+    (map-set cases
+      { case-id: case-id }
+      (merge case-data { 
+        status: STATUS-RESOLVED,
+        resolution-details: (some resolution-details),
+        reward-amount: reward-amount
+      }))
+    
+    (ok true)))
+  
+
+(define-public (add-authorized-signer (signer principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (map-set authorized-signers
+      { signer: signer }
+      { active: true }
+    )
+    (var-set signer-count (+ (var-get signer-count) u1))
+    (ok true)
+  )
+)
+
+(define-public (remove-authorized-signer (signer principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-authorized-signer signer) ERR-NOT-SIGNER)
+    (map-set authorized-signers
+      { signer: signer }
+      { active: false }
+    )
+    (var-set signer-count (- (var-get signer-count) u1))
+    (ok true)
+  )
+)
+
+(define-public (set-signature-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (> new-threshold u0) (<= new-threshold (var-get signer-count))) ERR-INVALID-THRESHOLD)
+    (var-set signature-threshold new-threshold)
+    (ok true)
+  )
+)
+
+(define-public (propose-case-resolution 
+    (case-id uint) 
+    (resolution-details (string-utf8 500)) 
+    (reward-amount uint))
+  (let
+    (
+      (proposal-id (+ (var-get proposal-count) u1))
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+    )
+    (asserts! (is-authorized-signer tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    
+    (map-set resolution-proposals
+      { proposal-id: proposal-id }
+      {
+        case-id: case-id,
+        resolution-details: resolution-details,
+        reward-amount: reward-amount,
+        proposer: tx-sender,
+        executed: false,
+        signature-count: u1,
+        proposal-type: u1,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (map-set proposal-signatures
+      { proposal-id: proposal-id, signer: tx-sender }
+      { signed: true }
+    )
+    
+    (var-set proposal-count proposal-id)
+    (ok proposal-id)
+  )
+)
+
+(define-public (propose-case-rejection 
+    (case-id uint) 
+    (resolution-details (string-utf8 500)))
+  (let
+    (
+      (proposal-id (+ (var-get proposal-count) u1))
+      (case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+    )
+    (asserts! (is-authorized-signer tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    
+    (map-set resolution-proposals
+      { proposal-id: proposal-id }
+      {
+        case-id: case-id,
+        resolution-details: resolution-details,
+        reward-amount: u0,
+        proposer: tx-sender,
+        executed: false,
+        signature-count: u1,
+        proposal-type: u2,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (map-set proposal-signatures
+      { proposal-id: proposal-id, signer: tx-sender }
+      { signed: true }
+    )
+    
+    (var-set proposal-count proposal-id)
+    (ok proposal-id)
+  )
+)
+
+(define-public (sign-proposal (proposal-id uint))
+  (let
+    (
+      (proposal-data (unwrap! (get-proposal proposal-id) ERR-PROPOSAL-NOT-FOUND))
+      (existing-signature (get-proposal-signature proposal-id tx-sender))
+    )
+    (asserts! (is-authorized-signer tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get executed proposal-data)) ERR-PROPOSAL-EXECUTED)
+    (asserts! (is-none existing-signature) ERR-ALREADY-SIGNED)
+    
+    (map-set proposal-signatures
+      { proposal-id: proposal-id, signer: tx-sender }
+      { signed: true }
+    )
+    
+    (map-set resolution-proposals
+      { proposal-id: proposal-id }
+      (merge proposal-data { signature-count: (+ (get signature-count proposal-data) u1) })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (execute-proposal (proposal-id uint))
+  (let
+    (
+      (proposal-data (unwrap! (get-proposal proposal-id) ERR-PROPOSAL-NOT-FOUND))
+      (case-data (unwrap! (get-case (get case-id proposal-data)) ERR-CASE-NOT-FOUND))
+    )
+    (asserts! (is-authorized-signer tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get executed proposal-data)) ERR-PROPOSAL-EXECUTED)
+    (asserts! (>= (get signature-count proposal-data) (var-get signature-threshold)) ERR-INSUFFICIENT-SIGNATURES)
+    
+    (map-set resolution-proposals
+      { proposal-id: proposal-id }
+      (merge proposal-data { executed: true })
+    )
+    
+    (if (is-eq (get proposal-type proposal-data) u1)
+      (map-set cases
+        { case-id: (get case-id proposal-data) }
+        (merge case-data { 
+          status: STATUS-RESOLVED,
+          resolution-details: (some (get resolution-details proposal-data)),
+          reward-amount: (get reward-amount proposal-data)
+        })
+      )
+      (map-set cases
+        { case-id: (get case-id proposal-data) }
+        (merge case-data { 
+          status: STATUS-REJECTED,
+          resolution-details: (some (get resolution-details proposal-data))
+        })
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+(define-read-only (is-authorized-signer (signer principal))
+  (default-to false (get active (map-get? authorized-signers { signer: signer })))
+)
+
+(define-read-only (get-proposal (proposal-id uint))
+  (map-get? resolution-proposals { proposal-id: proposal-id })
+)
+
+(define-read-only (get-proposal-signature (proposal-id uint) (signer principal))
+  (map-get? proposal-signatures { proposal-id: proposal-id, signer: signer })
+)
+
+(define-read-only (get-signature-threshold)
+  (var-get signature-threshold)
+)
+
+(define-read-only (get-proposal-count)
+  (var-get proposal-count)
+)
+
+(define-read-only (get-signer-count)
+  (var-get signer-count)
+)
+
+(define-public (escalate-case (case-id uint))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+     (escalation-data (get-case-escalation case-id))
+     (current-priority (unwrap! (calculate-case-priority case-id) ERR-INVALID-PRIORITY)))
+    (asserts! (var-get escalation-enabled) ERR-NOT-AUTHORIZED)
+    (asserts! (>= current-priority PRIORITY-HIGH) ERR-CASE-NOT-URGENT)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    (asserts! (> (- stacks-block-height (get last-escalation-height escalation-data)) HOURS-24) ERR-CASE-NOT-URGENT)
+    
+    (map-set case-escalations
+      { case-id: case-id }
+      { 
+        escalation-count: (+ (get escalation-count escalation-data) u1),
+        last-escalation-height: stacks-block-height,
+        escalation-priority: current-priority
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (auto-escalate-case (case-id uint))
+  (let
+    ((case-data (unwrap! (get-case case-id) ERR-CASE-NOT-FOUND))
+     (escalation-data (get-case-escalation case-id))
+     (current-priority (unwrap! (calculate-case-priority case-id) ERR-INVALID-PRIORITY)))
+    (asserts! (var-get escalation-enabled) ERR-NOT-AUTHORIZED)
+    (asserts! (>= current-priority PRIORITY-HIGH) ERR-CASE-NOT-URGENT)
+    (asserts! (not (is-eq (get status case-data) STATUS-RESOLVED)) ERR-CASE-CLOSED)
+    (asserts! (not (is-eq (get status case-data) STATUS-REJECTED)) ERR-CASE-CLOSED)
+    (asserts! (> (- stacks-block-height (get last-escalation-height escalation-data)) HOURS-24) ERR-CASE-NOT-URGENT)
+    
+    (map-set case-escalations
+      { case-id: case-id }
+      { 
+        escalation-count: (+ (get escalation-count escalation-data) u1),
+        last-escalation-height: stacks-block-height,
+        escalation-priority: current-priority
+      }
+    )
+    
+    (if (is-eq (get status case-data) STATUS-PENDING)
+      (begin
+        (map-set cases
+          { case-id: case-id }
+          (merge case-data { status: STATUS-UNDER-REVIEW })
+        )
+        true
+      )
+      true
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (toggle-escalation-system (enabled bool))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (var-set escalation-enabled enabled)
+    (ok true)
+  )
+)
+
+(define-public (bulk-escalate-overdue-cases)
+  (let
+    ((total-cases (var-get case-count))
+     (results (fold process-case-escalation (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) u0)))
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (var-get escalation-enabled) ERR-NOT-AUTHORIZED)
+    (ok results)
+  )
+)
+
+(define-private (process-case-escalation (case-id uint) (escalated-count uint))
+  (if (and (<= case-id (var-get case-count)) (is-case-overdue case-id))
+    (match (auto-escalate-case case-id)
+      success (+ escalated-count u1)
+      error escalated-count)
+    escalated-count))
+
+(define-read-only (get-escalation-status)
+  (ok (var-get escalation-enabled)))
+
+;; Similarity system management functions
+(define-public (set-similarity-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (>= new-threshold u0) (<= new-threshold u100)) ERR-INVALID-SIMILARITY-THRESHOLD)
+    (var-set similarity-threshold new-threshold)
+    (ok true)))
+
+(define-public (toggle-similarity-system (enabled bool))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (var-set similarity-enabled enabled)
+    (ok true)))
+
+(define-public (verify-similar-cases (primary-case uint) (related-case uint))
+  (let
+    ((similarity-data (unwrap! (map-get? similar-cases { primary-case: primary-case, related-case: related-case }) ERR-SIMILARITY-NOT-FOUND)))
+    (asserts! (is-reviewer tx-sender) ERR-NOT-AUTHORIZED)
+    (map-set similar-cases
+      { primary-case: primary-case, related-case: related-case }
+      (merge similarity-data { verified: true }))
+    (ok true)))
+
+(define-public (find-similar-cases-batch (target-case uint))
+  (let
+    ((target-fingerprint (unwrap! (get-case-fingerprint target-case) ERR-CASE-NOT-FOUND)))
+    (ok (fold find-similar-case 
+              (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) 
+              { target: (get combined-fingerprint target-fingerprint), 
+                results: (list), 
+                target-case: target-case }))))
+
+(define-private (find-similar-case 
+    (case-id uint) 
+    (search-data { target: (buff 32), results: (list 10 { case-id: uint, similarity: uint }), target-case: uint }))
+  (if (and (<= case-id (var-get case-count)) (not (is-eq case-id (get target-case search-data))))
+    (match (get-case-fingerprint case-id)
+      fp-data 
+        (let 
+          ((similarity (calculate-similarity (get target search-data) (get combined-fingerprint fp-data))))
+          (if (>= similarity (var-get similarity-threshold))
+            { target: (get target search-data), 
+              results: (unwrap-panic (as-max-len? 
+                         (append (get results search-data) { case-id: case-id, similarity: similarity }) 
+                         u10)), 
+              target-case: (get target-case search-data) }
+            search-data))
+      search-data)
+    search-data))
+
+(define-public (get-case-similarity-stats (case-id uint))
+  (let
+    ((fingerprint-data (unwrap! (get-case-fingerprint case-id) ERR-CASE-NOT-FOUND))
+     (cluster-data (get-case-cluster case-id)))
+    (ok {
+      has-fingerprint: true,
+      similarity-score: (get similarity-score fingerprint-data),
+      in-cluster: (is-some cluster-data),
+      cluster-info: cluster-data
+    })))
+
+(define-read-only (get-similarity-system-stats)
+  (ok {
+    similarity-enabled: (var-get similarity-enabled),
+    current-threshold: (var-get similarity-threshold),
+    total-fingerprints: (var-get case-count),
+    system-version: u1
+  }))
+
+
+
+  
