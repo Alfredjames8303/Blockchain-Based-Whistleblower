@@ -54,4 +54,9 @@ plan:
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
             path: "contracts\\Blockchain-Based-Whistleblower.clar"
             clarity-version: 3
+        - emulated-contract-publish:
+            contract-name: tip-validation
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: "contracts\\tip-validation.clar"
+            clarity-version: 3
       epoch: "3.1"
