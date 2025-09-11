@@ -1,0 +1,23 @@
+[project]
+name = 'Blockchain-Based-Whistleblower'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Blockchain-Based-Whistleblower]
+path = 'contracts/Blockchain-Based-Whistleblower.clar'
+clarity_version = 3
+epoch = 3.1
+[contracts.tip-validation]
+path = 'contracts/tip-validation.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
